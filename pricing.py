@@ -358,20 +358,16 @@ def filter_brief_cards_by_query_name(
     cards: list[dict[str, Any]],
     parsed: ParsedQuery,
     set_match: SetMatch | None = None,
-    allow_loose: bool = False,
 ) -> list[dict[str, Any]]:
     expected_name_tokens = set(tokenize(build_card_name_search(parsed, set_match)))
     if not expected_name_tokens or len(expected_name_tokens) <= 1:
         return cards
 
-    filtered_cards = [
+    return [
         card
         for card in cards
         if expected_name_tokens.issubset(set(tokenize(str(card.get("name") or ""))))
     ]
-    if filtered_cards:
-        return filtered_cards
-    return cards if allow_loose else []
 
 
 def available_variants(card: dict[str, Any]) -> list[str]:
@@ -465,10 +461,6 @@ def summarize_card(card: dict[str, Any]) -> str:
     set_name = str(card.get("set", {}).get("name") or "Unknown set")
     number = str(card.get("number") or "?")
     return f"{name} - {set_name} #{number}"
-
-
-def format_money(value: Any) -> str:
-    return format_money_for_unit(value, "USD")
 
 
 def format_money_for_unit(value: Any, unit: str) -> str:
@@ -603,7 +595,7 @@ def format_price_message(card: dict[str, Any], variant_key: str | None = None, c
                 ]
             )
     else:
-        lines.append("Prices: unavailable from TCGplayer")
+        lines.append("Prices: unavailable")
 
     updated_at = get_price_updated_at(card)
     source_detail = f"{source_name} ({conversion_text})" if conversion_text else source_name
@@ -617,22 +609,10 @@ def format_price_message(card: dict[str, Any], variant_key: str | None = None, c
 
 def compact_source_line(source_name: str, updated_at: str | None) -> str:
     source = source_name.replace(" via TCGdex", "")
-    compact_date = format_updated_at_date(updated_at)
+    compact_date = format_updated_at(updated_at)
     if compact_date:
         return f"Source: {source}\nUpdated: {escape(compact_date)}"
     return f"Source: {source}"
-
-
-def format_updated_at_date(value: str | None) -> str | None:
-    if not value:
-        return None
-    parsed = parse_datetime(value)
-    if not parsed:
-        return value
-    parsed_utc = parsed.astimezone(timezone.utc)
-    parsed_local = parsed_utc.astimezone(ZoneInfo("Asia/Singapore"))
-    time_text = parsed_local.strftime("%I:%M %p").lstrip("0")
-    return f"{parsed_local:%B} {parsed_local.day}, {parsed_local.year}, {time_text} SGT"
 
 
 class TCGdexPricingProvider(CachedProvider):

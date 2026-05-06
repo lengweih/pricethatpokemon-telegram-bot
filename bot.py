@@ -35,6 +35,8 @@ from pricing import (
 
 LOGGER = logging.getLogger(__name__)
 MAX_QUERY_LENGTH = 120
+PRICE_COMMANDS = ("price", "p")
+BOT_COMMANDS = frozenset((*PRICE_COMMANDS, "chatid", "start", "help"))
 
 
 def create_application() -> Application:
@@ -44,15 +46,15 @@ def create_application() -> Application:
     if not bot_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
 
-    max_results = int(os.getenv("MAX_RESULTS", "5"))
+    max_results = get_int_env("MAX_RESULTS", 5)
     price_client = create_price_provider(
         provider_id=os.getenv("PRICE_PROVIDER", "tcgdex"),
         tcgdex_api_base=os.getenv("TCGDEX_API_BASE", "https://api.tcgdex.net/v2/en"),
         tcgdex_image_quality=os.getenv("TCGDEX_IMAGE_QUALITY", "low"),
         tcgdex_image_extension=os.getenv("TCGDEX_IMAGE_EXTENSION", "webp"),
-        cache_ttl_seconds=int(os.getenv("CACHE_TTL_SECONDS", "3600")),
+        cache_ttl_seconds=get_int_env("CACHE_TTL_SECONDS", 3600),
         max_results=max_results,
-        tcgdex_candidate_limit=int(os.getenv("TCGDEX_CANDIDATE_LIMIT", str(max_results))),
+        tcgdex_candidate_limit=get_int_env("TCGDEX_CANDIDATE_LIMIT", max_results),
         display_currency=os.getenv("DISPLAY_CURRENCY", "SGD"),
         exchange_api_base=os.getenv("EXCHANGE_API_BASE", "https://api.frankfurter.dev"),
     )
@@ -68,7 +70,7 @@ def create_application() -> Application:
     application.bot_data["allowed_topic_ids"] = parse_allowed_topic_ids(os.getenv("ALLOWED_TOPIC_IDS", ""))
 
     application.add_handler(CommandHandler("chatid", chat_id_command))
-    application.add_handler(CommandHandler(["price", "p"], price_command))
+    application.add_handler(CommandHandler(PRICE_COMMANDS, price_command))
     application.add_handler(CommandHandler(["start", "help"], help_command))
     application.add_handler(CallbackQueryHandler(callback_query))
     application.add_error_handler(error_handler)
@@ -238,6 +240,16 @@ def parse_allowed_ids(raw_ids: str, env_name: str) -> frozenset[int]:
         except ValueError as exc:
             raise RuntimeError(f"Invalid {env_name} value: {raw_chat_id}") from exc
     return frozenset(chat_ids)
+
+
+def get_int_env(name: str, default: int) -> int:
+    raw_value = os.getenv(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid {name} value: {raw_value}") from exc
 
 
 def is_chat_allowed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:

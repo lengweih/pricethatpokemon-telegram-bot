@@ -53,7 +53,7 @@ def test_format_price_message_without_prices() -> None:
 
     message = format_price_message(card)
 
-    assert "Prices: unavailable from TCGplayer" in message
+    assert "Prices: unavailable" in message
 
 
 def test_format_price_message_with_cardmarket_fallback() -> None:

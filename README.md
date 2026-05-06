@@ -1,41 +1,58 @@
 # Pokemon Card Price Telegram Bot
 
-A small async Telegram bot that looks up Pokemon TCG card prices from Telegram commands.
+An async Telegram bot for quick Pokemon TCG card price lookups from a dedicated group topic.
 
-The MVP is optimized for a dedicated Telegram group topic. Users search with `/price`, such as `/price lugia 138`, `/price charizard 4/102`, or `/price lugia silver tempest`.
+The bot is command-only so Telegram privacy mode can stay enabled. Search with `/price` or the shorter `/p`:
 
-## What It Does
+```text
+/p lugia 138
+/p charizard 4/102
+/p mew paldean fates
+/p n's pp up 153
+```
 
-- Searches Pokemon TCG cards through TCGdex.
-- Shows the best match with a card image when available.
-- Displays TCGplayer USD low, mid, and market prices from TCGdex card responses when available.
-- Falls back to Cardmarket EUR low, average, and trend prices when TCGplayer data is missing.
-- Shows a compact price summary with source and date when available.
-- Provides inline buttons for alternate card matches and alternate price variants.
-- Uses best-effort in-memory TTL caching to reduce repeated API calls.
-- Supports Vercel FastAPI webhooks for production and local polling for development.
+## Features
 
-PSA and graded prices are intentionally omitted in the MVP because TCGdex provides raw marketplace pricing, not graded pricing.
+- Searches Pokemon cards through the free public TCGdex REST API.
+- Shows the best match with a card image when TCGdex provides one.
+- Supports multi-word card names, smart apostrophes, card numbers, and best-effort set-name hints.
+- Shows a compact price caption with variant, rarity, prices, source, and Singapore-time update date.
+- Prefers TCGplayer pricing from TCGdex when available.
+- Falls back to Cardmarket pricing from TCGdex when TCGplayer pricing is missing.
+- Converts displayed prices to `DISPLAY_CURRENCY`, defaulting to SGD through Frankfurter exchange rates.
+- Provides inline buttons for alternate card matches, alternate price variants, and the TCGdex source link.
+- Uses in-memory TTL caches for repeated searches, callback payloads, set metadata, and exchange rates.
+- Runs locally with Telegram polling and in production with a FastAPI webhook on Vercel.
+
+PSA and graded prices are intentionally not included because TCGdex does not provide graded-market pricing.
+
+## How Search Works
+
+The parser is intentionally simple:
+
+- A token like `138`, `138/195`, or `TG09/TG30` is treated as the card number.
+- The remaining text is treated as the card name plus optional trailing set hint.
+- If the trailing words match a TCGdex set name, they are sent as `set.name`.
+- Multi-word names are searched first as typed, then with punctuation stripped, then with a wider first-token fallback.
+- Broad fallbacks are locally filtered by the full card-name tokens, which prevents unrelated same-number alternatives like `Necrozma GX #153` when searching `n's pp up 153`.
+
+Set matching is best effort. If TCGdex set lookup fails, the bot still searches by card name and number.
 
 ## Project Structure
 
 ```text
 app.py                # FastAPI app for Vercel webhook + /health
-bot.py                # Telegram handlers and inline keyboard behavior
+bot.py                # Telegram handlers, command restrictions, inline keyboard behavior
 pricing.py            # Provider interface, TCGdex client, parsing, ranking, formatting
-local_polling.py      # Local polling runner
+local_polling.py      # Local polling runner for development
 requirements.txt
 .env.example
 tests/
 ```
 
-## Setup
+## Environment
 
-Create a bot with BotFather. TCGdex does not require an API key for this MVP.
-
-In BotFather, run `/setprivacy` for this bot and keep privacy mode enabled. The bot is command-only, so it does not need to receive every normal group/topic message.
-
-Copy the environment template:
+Copy the template:
 
 ```bash
 cp .env.example .env
@@ -60,6 +77,32 @@ MAX_RESULTS=5
 TCGDEX_CANDIDATE_LIMIT=5
 ```
 
+Notes:
+
+- `TELEGRAM_BOT_TOKEN` comes from BotFather.
+- TCGdex does not require an API key for this MVP.
+- `DISPLAY_CURRENCY=SGD` converts USD/EUR source pricing to Singapore dollars when an exchange rate is available.
+- `MAX_RESULTS` controls how many card results can be shown.
+- `TCGDEX_CANDIDATE_LIMIT` controls how many detailed card records are fetched after the initial search. During local testing, set both values to `1` to keep API calls low.
+
+## Telegram Setup
+
+1. Create a bot with BotFather and save `TELEGRAM_BOT_TOKEN`.
+2. In BotFather, run `/setprivacy` and keep privacy mode enabled.
+3. Start the bot locally or deploy it.
+4. Send `/chatid` in the exact group topic where the bot should work.
+5. Put the returned IDs into `.env`:
+
+```env
+ALLOWED_CHAT_IDS=-1001234567890
+ALLOWED_TOPIC_IDS=12345
+```
+
+Telegram forum topics share the same `Chat ID`; each topic has its own `Topic ID` / `message_thread_id`.
+Multiple IDs can be comma-separated. Leave `ALLOWED_CHAT_IDS` empty to allow every chat, and leave `ALLOWED_TOPIC_IDS` empty to allow every topic.
+
+## Local Development
+
 Install dependencies:
 
 ```bash
@@ -68,32 +111,19 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Run locally with polling:
+Run with polling:
 
 ```bash
 python local_polling.py
 ```
 
-Local polling drops old pending Telegram updates on startup, so it should only answer new messages sent after the process starts.
-It also suppresses low-level HTTP request logs so your bot token is not printed in every Telegram API URL.
-Allowed searches are still logged by the app, including the query, chat ID, and topic ID.
+Local polling calls Telegram's `getUpdates` endpoint repeatedly. That is normal for local development and does not involve Vercel. The runner drops old pending updates on startup and suppresses low-level HTTP logs so your bot token is not printed in every request URL.
 
-For group chats, keep BotFather privacy mode enabled and use `/price ...` commands. This prevents Telegram from sending every plain text topic message to the bot.
-
-To restrict the bot to one Telegram chat or topic:
-
-1. Start the bot locally or deploy it.
-2. Send `/chatid` in the group topic you want to allow.
-3. Copy the returned IDs into `.env`:
-
-```env
-ALLOWED_CHAT_IDS=-1001234567890
-ALLOWED_TOPIC_IDS=12345
-```
-
-Telegram forum topics share the same `Chat ID`; the `Topic ID` is the per-topic `message_thread_id`. Multiple chats or topics can be comma-separated. Leave `ALLOWED_CHAT_IDS` empty to allow all chats, and leave `ALLOWED_TOPIC_IDS` empty to allow all topics.
+Allowed searches are still logged by the app, including query, chat ID, and topic ID.
 
 ## Vercel Deployment
+
+Production uses Telegram webhooks, not polling. Vercel is only invoked when Telegram sends an update to your webhook URL. With privacy mode enabled and command-only routing, normal group messages should not create meaningful bot work.
 
 1. Push this repo to GitHub.
 2. Import the repo into Vercel.
@@ -111,10 +141,11 @@ curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
 Test in Telegram:
 
 ```text
-/price lugia 138
-/price charizard 4/102
-/price lugia silver tempest
-/price rare candy
+/p lugia 138
+/p charizard 4/102
+/p mew paldean fates
+/p rare candy
+/p n's pp up 153
 ```
 
 ## Tests
@@ -123,19 +154,17 @@ Test in Telegram:
 pytest
 ```
 
-The tests cover parsing, query construction, ranking, default variant selection, price formatting, and callback expiration behavior.
+The suite covers parsing, multi-word search fallback, set matching, ranking, variant selection, price normalization, formatting, webhook filtering, and callback cache behavior.
 
-## Notes
+## Provider Notes
 
-- Data source: TCGdex REST API.
-- Price source shown to users: TCGplayer via TCGdex when available, otherwise Cardmarket via TCGdex.
-- Currency: TCGdex prices are native USD or EUR, then converted to `DISPLAY_CURRENCY=SGD` using Frankfurter exchange rates when conversion is available.
+- Current provider: `PRICE_PROVIDER=tcgdex`.
+- Price source: TCGplayer via TCGdex when available, otherwise Cardmarket via TCGdex.
+- Currency: source prices are USD or EUR, then converted to `DISPLAY_CURRENCY` when possible.
 - Images: TCGdex `low.webp` assets by default, with a PNG fallback if Telegram rejects the primary image.
 - Cache: in-memory TTL cache. On Vercel this is best-effort per warm function instance.
-- Local API-call control: `MAX_RESULTS=1` and `TCGDEX_CANDIDATE_LIMIT=1` will fetch/show only one candidate per search, which is useful while testing.
-- Command-only mode: lookups are handled only by `/price`; non-command text is ignored, and the Vercel webhook returns before app initialization for non-command messages.
-- Provider switching: `PRICE_PROVIDER=tcgdex` is the only implemented provider today, but `pricing.py` isolates provider creation and response normalization so another provider can be added behind the same bot interface.
-- PriceCharting is not used because PSA/graded pricing requires a paid API for a clean implementation.
+- Provider switching: `pricing.py` keeps provider creation and normalized card output behind a small interface, so another source can be added later without rewriting Telegram handlers.
+- PriceCharting is not used because graded pricing requires a paid API for a clean implementation.
 
 Useful TCGdex docs:
 

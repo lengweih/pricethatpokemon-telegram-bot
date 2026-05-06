@@ -9,14 +9,13 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from telegram import Update
 from telegram.ext import Application
 
-from bot import create_application
+from bot import BOT_COMMANDS, create_application
 
 
 load_dotenv()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logging.getLogger("httpx").setLevel(logging.WARNING)
 LOGGER = logging.getLogger(__name__)
-BOT_COMMANDS = frozenset({"price", "p", "chatid", "start", "help"})
 
 app = FastAPI()
 _telegram_app: Application | None = None
