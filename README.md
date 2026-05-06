@@ -9,6 +9,7 @@ The bot is command-only so Telegram privacy mode can stay enabled. Search with `
 /p charizard 4/102
 /p mew paldean fates
 /p n's pp up 153
+/p snorunt 63
 ```
 
 ## Features
@@ -16,6 +17,7 @@ The bot is command-only so Telegram privacy mode can stay enabled. Search with `
 - Searches Pokemon cards through the free public TCGdex REST API.
 - Shows the best match with a card image when TCGdex provides one.
 - Supports multi-word card names, smart apostrophes, card numbers, and best-effort set-name hints.
+- Automatically searches Japanese TCGdex cards for Pokemon-name + number queries like `snorunt 63`.
 - Shows a compact price caption with variant, rarity, prices, source, and Singapore-time update date.
 - Prefers TCGplayer pricing from TCGdex when available.
 - Falls back to Cardmarket pricing from TCGdex when TCGplayer pricing is missing.
@@ -34,9 +36,11 @@ The parser is intentionally simple:
 - The remaining text is treated as the card name plus optional trailing set hint.
 - If the trailing words match a TCGdex set name, they are sent as `set.name`.
 - Multi-word names are searched first as typed, then with punctuation stripped, then with a wider first-token fallback.
+- Japanese search uses a generated static Pokemon name map, so `snorunt 63` can search `ユキワラシ` on TCGdex `/ja`.
+- Plain numeric Japanese card numbers are padded automatically, so `63` also tries `063`.
 - Broad fallbacks are locally filtered by the full card-name tokens, which prevents unrelated same-number alternatives like `Necrozma GX #153` when searching `n's pp up 153`.
 
-Set matching is best effort. If TCGdex set lookup fails, the bot still searches by card name and number.
+Set matching is best effort. If TCGdex set lookup fails, the bot still searches by card name and number. Japanese auto-search is currently for Pokemon-name searches; trainer/item Japanese-name translation is not included yet.
 
 ## Project Structure
 
@@ -44,7 +48,9 @@ Set matching is best effort. If TCGdex set lookup fails, the bot still searches 
 app.py                # FastAPI app for Vercel webhook + /health
 bot.py                # Telegram handlers, command restrictions, inline keyboard behavior
 pricing.py            # Provider interface, TCGdex client, parsing, ranking, formatting
+pokemon_names.py      # Generated English-to-Japanese Pokemon name aliases
 local_polling.py      # Local polling runner for development
+scripts/build_pokemon_names.py
 requirements.txt
 .env.example
 tests/
@@ -68,6 +74,8 @@ PRICE_PROVIDER=tcgdex
 DISPLAY_CURRENCY=SGD
 EXCHANGE_API_BASE=https://api.frankfurter.dev
 TCGDEX_API_BASE=https://api.tcgdex.net/v2/en
+TCGDEX_JAPANESE_API_BASE=https://api.tcgdex.net/v2/ja
+ENABLE_JAPANESE_SEARCH=true
 TCGDEX_IMAGE_QUALITY=low
 TCGDEX_IMAGE_EXTENSION=webp
 WEBHOOK_SECRET_PATH=telegram/YOUR_RANDOM_PATH
@@ -84,6 +92,7 @@ Notes:
 - `DISPLAY_CURRENCY=SGD` converts USD/EUR source pricing to Singapore dollars when an exchange rate is available.
 - `MAX_RESULTS` controls how many card results can be shown.
 - `TCGDEX_CANDIDATE_LIMIT` controls how many detailed card records are fetched after the initial search. During local testing, set both values to `1` to keep API calls low.
+- `ENABLE_JAPANESE_SEARCH=true` lets the bot combine English and Japanese TCGdex results automatically.
 
 ## Telegram Setup
 
@@ -146,6 +155,7 @@ Test in Telegram:
 /p mew paldean fates
 /p rare candy
 /p n's pp up 153
+/p snorunt 63
 ```
 
 ## Tests
@@ -154,7 +164,7 @@ Test in Telegram:
 pytest
 ```
 
-The suite covers parsing, multi-word search fallback, set matching, ranking, variant selection, price normalization, formatting, webhook filtering, and callback cache behavior.
+The suite covers parsing, multi-word search fallback, Japanese Pokemon-name search, set matching, ranking, variant selection, price normalization, formatting, webhook filtering, and callback cache behavior.
 
 ## Provider Notes
 
@@ -163,6 +173,7 @@ The suite covers parsing, multi-word search fallback, set matching, ranking, var
 - Currency: source prices are USD or EUR, then converted to `DISPLAY_CURRENCY` when possible.
 - Images: TCGdex `low.webp` assets by default, with a PNG fallback if Telegram rejects the primary image.
 - Cache: in-memory TTL cache. On Vercel this is best-effort per warm function instance.
+- Japanese cards: TCGdex `/ja` metadata/images are used when a Pokemon-name + number query matches the generated alias map. Pricing is still TCGdex marketplace pricing, usually Cardmarket, not Japanese-market pricing.
 - Provider switching: `pricing.py` keeps provider creation and normalized card output behind a small interface, so another source can be added later without rewriting Telegram handlers.
 - PriceCharting is not used because graded pricing requires a paid API for a clean implementation.
 

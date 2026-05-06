@@ -18,6 +18,9 @@ from pricing import (
     extract_frankfurter_rate,
     filter_brief_cards_by_query_name,
     format_updated_at,
+    build_japanese_search_spec,
+    japanese_number_variants,
+    match_pokemon_name_prefix,
     match_set_from_tokens,
     normalize_tcgdex_cardmarket_prices,
     normalize_tcgdex_tcgplayer_prices,
@@ -71,6 +74,38 @@ def test_build_card_name_search_normalizes_curly_apostrophe() -> None:
     assert parsed.normalized == "n's pp up 153"
     assert build_card_name_search(parsed) == "n's pp up"
     assert build_card_name_searches(parsed) == ("n's pp up", "n s pp up", "n")
+
+
+def test_japanese_number_variants_pad_plain_numbers() -> None:
+    assert japanese_number_variants("63") == ("063", "63")
+    assert japanese_number_variants("063") == ("063", "63")
+    assert japanese_number_variants("TG09") == ("TG09",)
+
+
+def test_match_pokemon_name_prefix_uses_longest_alias() -> None:
+    match = match_pokemon_name_prefix(parse_query("mr mime 63"))
+
+    assert match is not None
+    assert match.english == "Mr. Mime"
+    assert match.japanese == "バリヤード"
+    assert match.matched_terms == 2
+
+
+def test_build_japanese_search_spec_translates_pokemon_name() -> None:
+    search_spec = build_japanese_search_spec(parse_query("snorunt 63"))
+
+    assert search_spec is not None
+    assert search_spec.names == ("ユキワラシ",)
+    assert search_spec.number_variants == ("063", "63")
+    assert search_spec.dex_id == 361
+
+
+def test_build_japanese_search_spec_accepts_direct_japanese_name() -> None:
+    search_spec = build_japanese_search_spec(parse_query("ユキワラシ 63"))
+
+    assert search_spec is not None
+    assert search_spec.names == ("ユキワラシ",)
+    assert search_spec.number_variants == ("063", "63")
 
 
 def test_filter_brief_cards_by_query_name_removes_unrelated_number_matches() -> None:
@@ -148,7 +183,7 @@ def test_select_default_variant_honors_available_hint() -> None:
 
 
 def test_search_cards_handles_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = TCGdexPricingProvider()
+    client = TCGdexPricingProvider(enable_japanese_search=False)
 
     class FakeHTTP:
         async def get(self, path, params=None):
@@ -161,7 +196,7 @@ def test_search_cards_handles_rate_limit(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_search_cards_handles_no_results(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = TCGdexPricingProvider()
+    client = TCGdexPricingProvider(enable_japanese_search=False)
 
     class FakeResponse:
         status_code = 200
@@ -180,7 +215,7 @@ def test_search_cards_handles_no_results(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_search_cards_handles_bad_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = TCGdexPricingProvider()
+    client = TCGdexPricingProvider(enable_japanese_search=False)
 
     class FakeResponse:
         status_code = 200
@@ -291,7 +326,7 @@ def test_normalize_tcgdex_cardmarket_prices_uses_holo_for_holo_only_card() -> No
 
 
 def test_search_cards_fetches_details_and_normalizes(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = TCGdexPricingProvider(display_currency="USD")
+    client = TCGdexPricingProvider(display_currency="USD", enable_japanese_search=False)
 
     class FakeResponse:
         status_code = 200
@@ -348,8 +383,207 @@ def test_search_cards_fetches_details_and_normalizes(monkeypatch: pytest.MonkeyP
     assert response.cards[0]["tcgplayer"]["prices"]["normal"]["market"] == 3.3
 
 
+def test_search_cards_merges_english_and_japanese_exact_matches(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = TCGdexPricingProvider(max_results=2, candidate_limit=2, display_currency="USD")
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    class FakeHTTP:
+        def __init__(self, language="en"):
+            self.language = language
+
+        async def get(self, path, params=None):
+            if path == "/cards" and self.language == "en":
+                assert params["name"] == "lugia*"
+                assert params["localId"] == "138"
+                return FakeResponse([{"id": "swsh12-138", "localId": "138", "name": "Lugia V"}])
+            if path == "/cards" and self.language == "ja":
+                assert params["name"] == "ルギア*"
+                assert params["localId"] == "138"
+                return FakeResponse([{"id": "S11-138", "localId": "138", "name": "ルギア"}])
+            if path == "/cards/swsh12-138":
+                return FakeResponse(
+                    {
+                        "id": "swsh12-138",
+                        "localId": "138",
+                        "name": "Lugia V",
+                        "set": {"id": "swsh12", "name": "Silver Tempest"},
+                        "pricing": {"tcgplayer": {"unit": "USD", "normal": {"marketPrice": 1}}},
+                    }
+                )
+            return FakeResponse(
+                {
+                    "id": "S11-138",
+                    "localId": "138",
+                    "name": "ルギア",
+                    "dexId": [249],
+                    "set": {"id": "S11", "name": "白熱のアルカナ"},
+                    "pricing": {"cardmarket": {"unit": "EUR", "trend": 1}},
+                }
+            )
+
+    monkeypatch.setattr(client, "_get_client", lambda language="en": FakeHTTP(language))
+
+    response = asyncio.run(client.search_cards("lugia 138"))
+
+    assert [card["language"] for card in response.cards] == ["en", "ja"]
+    assert response.cards[1]["source_url"] == "https://api.tcgdex.net/v2/ja/cards/S11-138"
+
+
+def test_search_cards_prefers_japanese_exact_over_loose_english(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = TCGdexPricingProvider(max_results=2, candidate_limit=2, display_currency="USD")
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    class FakeHTTP:
+        def __init__(self, language="en"):
+            self.language = language
+
+        async def get(self, path, params=None):
+            if path == "/cards" and self.language == "en" and params.get("localId") == "63":
+                return FakeResponse([])
+            if path == "/cards" and self.language == "en":
+                return FakeResponse([{"id": "bw9-21", "localId": "21", "name": "Snorunt"}])
+            if path == "/cards" and self.language == "ja":
+                if params["name"] == "ユキワラシ*" and params["localId"] == "063":
+                    return FakeResponse([{"id": "SV3a-063", "localId": "063", "name": "ユキワラシ"}])
+                return FakeResponse([])
+            if path == "/cards/bw9-21":
+                return FakeResponse(
+                    {
+                        "id": "bw9-21",
+                        "localId": "21",
+                        "name": "Snorunt",
+                        "set": {"id": "bw9", "name": "Plasma Blast"},
+                    }
+                )
+            return FakeResponse(
+                {
+                    "id": "SV3a-063",
+                    "localId": "063",
+                    "name": "ユキワラシ",
+                    "dexId": [361],
+                    "set": {"id": "SV3a", "name": "レイジングサーフ"},
+                }
+            )
+
+    monkeypatch.setattr(client, "_get_client", lambda language="en": FakeHTTP(language))
+
+    response = asyncio.run(client.search_cards("snorunt 63"))
+
+    assert response.cards[0]["id"] == "SV3a-063"
+    assert response.cards[0]["language"] == "ja"
+    assert response.cards[1]["id"] == "bw9-21"
+
+
+def test_search_cards_keeps_direct_japanese_match_without_dex_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = TCGdexPricingProvider(max_results=3, candidate_limit=3, display_currency="USD")
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    class FakeHTTP:
+        def __init__(self, language="en"):
+            self.language = language
+
+        async def get(self, path, params=None):
+            if path == "/cards" and self.language == "en":
+                assert params["name"] == "lugia*"
+                assert params["localId"] == "79"
+                return FakeResponse([{"id": "xy10-79", "localId": "79", "name": "Lugia BREAK"}])
+            if path == "/cards" and self.language == "ja":
+                assert params["name"] == "ルギア*"
+                assert params["localId"] == "079"
+                return FakeResponse([{"id": "S12-079", "localId": "079", "name": "ルギアV"}])
+            if path == "/cards/xy10-79":
+                return FakeResponse(
+                    {
+                        "id": "xy10-79",
+                        "localId": "79",
+                        "name": "Lugia BREAK",
+                        "set": {"id": "xy10", "name": "Fates Collide"},
+                    }
+                )
+            return FakeResponse(
+                {
+                    "id": "S12-079",
+                    "localId": "079",
+                    "name": "ルギアV",
+                    "dexId": None,
+                    "set": {"id": "S12", "name": "パラダイムトリガー"},
+                }
+            )
+
+    monkeypatch.setattr(client, "_get_client", lambda language="en": FakeHTTP(language))
+
+    response = asyncio.run(client.search_cards("lugia 79"))
+
+    assert [card["id"] for card in response.cards] == ["xy10-79", "S12-079"]
+    assert response.cards[1]["language"] == "ja"
+
+
+def test_japanese_broad_fallback_filters_by_dex_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = TCGdexPricingProvider(max_results=2, candidate_limit=2, display_currency="USD")
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    class FakeHTTP:
+        def __init__(self, language="en"):
+            self.language = language
+
+        async def get(self, path, params=None):
+            if self.language == "en" and path == "/cards":
+                return FakeResponse([])
+            if self.language == "ja" and path == "/cards" and params.get("name"):
+                return FakeResponse([])
+            if self.language == "ja" and path == "/cards":
+                assert params["localId"] == "063"
+                return FakeResponse(
+                    [
+                        {"id": "SV7-063", "localId": "063", "name": "ゴロンダ"},
+                        {"id": "SV3a-063", "localId": "063", "name": "ユキワラシ"},
+                    ]
+                )
+            if path == "/cards/SV7-063":
+                return FakeResponse({"id": "SV7-063", "localId": "063", "name": "ゴロンダ", "dexId": [675]})
+            return FakeResponse({"id": "SV3a-063", "localId": "063", "name": "ユキワラシ", "dexId": [361]})
+
+    monkeypatch.setattr(client, "_get_client", lambda language="en": FakeHTTP(language))
+
+    response = asyncio.run(client.search_cards("snorunt 63"))
+
+    assert [card["id"] for card in response.cards] == ["SV3a-063"]
+
+
 def test_search_cards_filters_by_detected_set_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = TCGdexPricingProvider(max_results=1, candidate_limit=1)
+    client = TCGdexPricingProvider(max_results=1, candidate_limit=1, enable_japanese_search=False)
 
     class FakeResponse:
         status_code = 200
@@ -397,7 +631,7 @@ def test_search_cards_filters_by_detected_set_name(monkeypatch: pytest.MonkeyPat
 
 
 def test_search_cards_uses_full_card_name_for_numbered_alternatives(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = TCGdexPricingProvider(max_results=3, candidate_limit=3, display_currency="USD")
+    client = TCGdexPricingProvider(max_results=3, candidate_limit=3, display_currency="USD", enable_japanese_search=False)
     searches: list[str] = []
 
     class FakeResponse:
@@ -449,7 +683,7 @@ def test_search_cards_uses_full_card_name_for_numbered_alternatives(monkeypatch:
 
 
 def test_search_cards_continues_when_set_lookup_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = TCGdexPricingProvider(max_results=1, candidate_limit=1, display_currency="USD")
+    client = TCGdexPricingProvider(max_results=1, candidate_limit=1, display_currency="USD", enable_japanese_search=False)
 
     class FakeResponse:
         status_code = 200
@@ -521,7 +755,7 @@ def test_normalize_converts_prices_to_display_currency(monkeypatch: pytest.Monke
 
 
 def test_search_cards_respects_candidate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = TCGdexPricingProvider(max_results=1, candidate_limit=1)
+    client = TCGdexPricingProvider(max_results=1, candidate_limit=1, enable_japanese_search=False)
     detail_paths = []
 
     class FakeResponse:

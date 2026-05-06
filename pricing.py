@@ -13,9 +13,12 @@ from zoneinfo import ZoneInfo
 import httpx
 from cachetools import TTLCache
 
+from pokemon_names import POKEMON_NAME_ALIASES
+
 
 NUMBER_RE = re.compile(r"^(?P<number>[a-z]{0,5}\d{1,4}[a-z]?)(?:/[a-z]{0,5}\d{1,4}[a-z]?)?$", re.IGNORECASE)
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
+JAPANESE_TEXT_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 SMART_PUNCTUATION_TRANSLATION = str.maketrans(
     {
         "’": "'",
@@ -39,6 +42,8 @@ VARIANT_ORDER = (
     "unlimitedHolofoil",
 )
 BROAD_NAME_FALLBACK_PAGE_SIZE = 25
+LANGUAGE_LABELS = {"en": "English", "ja": "Japanese"}
+LANGUAGE_BADGES = {"en": "EN", "ja": "JP"}
 
 VARIANT_LABELS = {
     "normal": "Normal",
@@ -140,6 +145,22 @@ class SetMatch:
     matched_tokens: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class PokemonNameMatch:
+    dex_id: int
+    english: str
+    japanese: str
+    alias: str
+    matched_terms: int
+
+
+@dataclass(frozen=True)
+class JapaneseSearchSpec:
+    names: tuple[str, ...]
+    number_variants: tuple[str, ...]
+    dex_id: int | None = None
+
+
 class PricingProvider(Protocol):
     provider_id: str
     provider_name: str
@@ -193,6 +214,8 @@ def create_price_provider(
     tcgdex_image_quality: str = "low",
     tcgdex_image_extension: str = "webp",
     tcgdex_candidate_limit: int | None = None,
+    tcgdex_japanese_api_base: str | None = None,
+    enable_japanese_search: bool = True,
     display_currency: str = "SGD",
     exchange_api_base: str = "https://api.frankfurter.dev",
 ) -> PricingProvider:
@@ -203,6 +226,8 @@ def create_price_provider(
             image_quality=tcgdex_image_quality,
             image_extension=tcgdex_image_extension,
             candidate_limit=tcgdex_candidate_limit,
+            japanese_base_url=tcgdex_japanese_api_base,
+            enable_japanese_search=enable_japanese_search,
             display_currency=display_currency,
             exchange_api_base=exchange_api_base,
             cache_ttl_seconds=cache_ttl_seconds,
@@ -219,6 +244,10 @@ def normalize_query(raw_query: str) -> str:
 
 def tokenize(value: str) -> tuple[str, ...]:
     return tuple(match.group(0).lower() for match in TOKEN_RE.finditer(value))
+
+
+def contains_japanese_text(value: str) -> bool:
+    return bool(JAPANESE_TEXT_RE.search(value))
 
 
 def parse_query(raw_query: str) -> ParsedQuery:
@@ -239,10 +268,16 @@ def parse_query(raw_query: str) -> ParsedQuery:
             card_number = number_match.group("number")
             continue
 
-        for token in tokenize(cleaned_term):
+        term_tokens = tokenize(cleaned_term)
+        for token in term_tokens:
             if token not in IGNORED_VARIANT_WORDS:
                 searchable_tokens.append(token)
-        if cleaned_term and not all(token in IGNORED_VARIANT_WORDS for token in tokenize(cleaned_term)):
+        if not term_tokens and contains_japanese_text(cleaned_term):
+            searchable_tokens.append(cleaned_term)
+        if cleaned_term and (
+            contains_japanese_text(cleaned_term)
+            or not all(token in IGNORED_VARIANT_WORDS for token in term_tokens)
+        ):
             search_terms.append(cleaned_term)
 
     variant_hint = detect_variant_hint(tokens)
@@ -354,6 +389,83 @@ def strip_search_punctuation(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
 
 
+def normalize_pokemon_alias(value: str) -> str:
+    return " ".join(tokenize(value))
+
+
+def match_pokemon_name_prefix(parsed: ParsedQuery) -> PokemonNameMatch | None:
+    terms = list(parsed.search_terms)
+    for term_count in range(len(terms), 0, -1):
+        alias = normalize_pokemon_alias(" ".join(terms[:term_count]))
+        pokemon_info = POKEMON_NAME_ALIASES.get(alias)
+        if pokemon_info:
+            return PokemonNameMatch(
+                dex_id=int(pokemon_info["dex_id"]),
+                english=str(pokemon_info["english"]),
+                japanese=str(pokemon_info["japanese"]),
+                alias=alias,
+                matched_terms=term_count,
+            )
+    return None
+
+
+def build_japanese_search_spec(parsed: ParsedQuery) -> JapaneseSearchSpec | None:
+    if not parsed.card_number:
+        return None
+
+    number_variants = japanese_number_variants(parsed.card_number)
+    if not number_variants:
+        return None
+
+    names: list[str] = []
+    direct_japanese_name = build_direct_japanese_name_search(parsed)
+    if direct_japanese_name:
+        names.append(direct_japanese_name)
+
+    pokemon_match = match_pokemon_name_prefix(parsed)
+    if pokemon_match and pokemon_match.japanese not in names:
+        names.append(pokemon_match.japanese)
+
+    if not names:
+        return None
+
+    return JapaneseSearchSpec(
+        names=tuple(names),
+        number_variants=number_variants,
+        dex_id=pokemon_match.dex_id if pokemon_match else None,
+    )
+
+
+def build_direct_japanese_name_search(parsed: ParsedQuery) -> str | None:
+    terms: list[str] = []
+    for term in parsed.search_terms:
+        if contains_japanese_text(term):
+            terms.append(term)
+        elif terms:
+            break
+    if not terms:
+        return None
+    return " ".join(terms)
+
+
+def japanese_number_variants(card_number: str | None) -> tuple[str, ...]:
+    if not card_number:
+        return ()
+
+    normalized_number = card_number.strip()
+    if not normalized_number:
+        return ()
+
+    variants: list[str] = []
+    if normalized_number.isdigit():
+        for variant in (normalized_number.zfill(3), normalized_number.lstrip("0") or "0"):
+            if variant not in variants:
+                variants.append(variant)
+    else:
+        variants.append(normalized_number)
+    return tuple(variants)
+
+
 def filter_brief_cards_by_query_name(
     cards: list[dict[str, Any]],
     parsed: ParsedQuery,
@@ -412,12 +524,15 @@ def rank_cards(cards: list[dict[str, Any]], parsed: ParsedQuery) -> list[dict[st
         set_name_tokens = set(tokenize(str(card.get("set", {}).get("name") or "")))
 
         if expected_number:
-            if card_number == expected_number:
+            if card_numbers_equivalent(card_number, expected_number):
                 score += 80
-            elif card_number.startswith(expected_number) or expected_number.startswith(card_number):
+            elif card_number and (card_number.startswith(expected_number) or expected_number.startswith(card_number)):
                 score += 30
 
         if parsed.name_anchor and str(card.get("name") or "").lower().startswith(parsed.name_anchor):
+            score += 20
+
+        if card.get("query_name_match"):
             score += 20
 
         score += 12 * len(query_name_tokens & card_name_tokens)
@@ -438,6 +553,14 @@ def rank_cards(cards: list[dict[str, Any]], parsed: ParsedQuery) -> list[dict[st
     return [copy.deepcopy(card) for _, card in ranked]
 
 
+def card_numbers_equivalent(card_number: str, expected_number: str) -> bool:
+    if card_number == expected_number:
+        return True
+    if card_number.isdigit() and expected_number.isdigit():
+        return (card_number.lstrip("0") or "0") == (expected_number.lstrip("0") or "0")
+    return False
+
+
 def get_card_link(card: dict[str, Any]) -> tuple[str, str] | None:
     label = card.get("source_link_label")
     url = card.get("source_url")
@@ -456,11 +579,26 @@ def get_fallback_image_url(card: dict[str, Any]) -> str | None:
     return str(image_url) if image_url else None
 
 
-def summarize_card(card: dict[str, Any]) -> str:
+def summarize_card(card: dict[str, Any], include_language: bool = False) -> str:
     name = str(card.get("name") or "Unknown card")
     set_name = str(card.get("set", {}).get("name") or "Unknown set")
     number = str(card.get("number") or "?")
-    return f"{name} - {set_name} #{number}"
+    summary = f"{name} - {set_name} #{number}"
+    if include_language:
+        return f"[{get_language_badge(card)}] {summary}"
+    return summary
+
+
+def get_language_badge(card: dict[str, Any]) -> str:
+    language = str(card.get("language") or "en")
+    return LANGUAGE_BADGES.get(language, language.upper())
+
+
+def get_language_suffix(card: dict[str, Any]) -> str:
+    language = str(card.get("language") or "en")
+    if language == "en":
+        return ""
+    return f" ({get_language_badge(card)})"
 
 
 def format_money_for_unit(value: Any, unit: str) -> str:
@@ -550,17 +688,18 @@ def format_price_message(card: dict[str, Any], variant_key: str | None = None, c
     name = escape(str(card.get("name") or "Unknown card"))
     set_name = escape(str(card.get("set", {}).get("name") or "Unknown set"))
     number = escape(str(card.get("number") or "?"))
+    language_suffix = escape(get_language_suffix(card))
     rarity = escape(str(card.get("rarity") or "Unknown rarity"))
     source_name = escape(str(card.get("price_source_name") or card.get("provider_name") or "Pricing provider"))
     conversion_text = escape(str(get_price_conversion_text(card) or ""))
     selected_variant = variant_key or select_default_variant(card)
 
     if compact:
-        lines = [f"<b>{name}</b> - {set_name} #{number}"]
+        lines = [f"<b>{name}</b> - {set_name} #{number}{language_suffix}"]
     else:
         lines = [
             f"<b>{name}</b>",
-            f"{set_name} #{number}",
+            f"{set_name} #{number}{language_suffix}",
             f"Rarity: {rarity}",
         ]
 
@@ -625,6 +764,8 @@ class TCGdexPricingProvider(CachedProvider):
         image_quality: str = "low",
         image_extension: str = "webp",
         candidate_limit: int | None = None,
+        japanese_base_url: str | None = None,
+        enable_japanese_search: bool = True,
         display_currency: str = "SGD",
         exchange_api_base: str = "https://api.frankfurter.dev",
         cache_ttl_seconds: int = 3600,
@@ -637,6 +778,8 @@ class TCGdexPricingProvider(CachedProvider):
             timeout_seconds=timeout_seconds,
         )
         self.base_url = base_url.rstrip("/")
+        self.japanese_base_url = (japanese_base_url or derive_japanese_base_url(base_url)).rstrip("/")
+        self.enable_japanese_search = enable_japanese_search
         self.image_quality = image_quality
         self.image_extension = image_extension
         self.candidate_limit = max(1, candidate_limit or max_results)
@@ -645,12 +788,16 @@ class TCGdexPricingProvider(CachedProvider):
         self.set_cache: TTLCache[str, tuple[dict[str, Any], ...]] = TTLCache(maxsize=1, ttl=cache_ttl_seconds)
         self.exchange_rate_cache: TTLCache[str, float] = TTLCache(maxsize=16, ttl=cache_ttl_seconds)
         self._client: httpx.AsyncClient | None = None
+        self._japanese_client: httpx.AsyncClient | None = None
         self._exchange_client: httpx.AsyncClient | None = None
 
     async def close(self) -> None:
         if self._client:
             await self._client.aclose()
             self._client = None
+        if self._japanese_client:
+            await self._japanese_client.aclose()
+            self._japanese_client = None
         if self._exchange_client:
             await self._exchange_client.aclose()
             self._exchange_client = None
@@ -670,22 +817,103 @@ class TCGdexPricingProvider(CachedProvider):
         return search_response
 
     async def _search_and_rank(self, parsed: ParsedQuery) -> tuple[dict[str, Any], ...]:
-        set_match = await self._match_set(parsed)
-        brief_cards = await self._search_brief_cards(parsed, include_card_number=True, set_match=set_match)
-        if not brief_cards and parsed.card_number:
-            brief_cards = await self._search_brief_cards(parsed, include_card_number=False, set_match=set_match)
-        if not brief_cards:
+        english_cards, japanese_cards = await asyncio.gather(
+            self._search_english_cards(parsed),
+            self._search_japanese_cards(parsed),
+        )
+        combined_cards = deduplicate_cards([*english_cards, *japanese_cards])
+        if not combined_cards:
             raise NoCardsFound("No matching cards found.")
 
-        detail_cards = await self._fetch_card_details(brief_cards[: self.candidate_limit])
-        if not detail_cards:
-            raise NoCardsFound("No matching cards found.")
-
-        normalized_cards = [await self._normalize_card(card) for card in detail_cards]
-        ranked_cards = tuple(rank_cards(normalized_cards, parsed)[: self.max_results])
+        ranked_cards = tuple(rank_cards(combined_cards, parsed)[: self.max_results])
         if not ranked_cards:
             raise NoCardsFound("No matching cards found.")
         return ranked_cards
+
+    async def _search_english_cards(self, parsed: ParsedQuery) -> list[dict[str, Any]]:
+        try:
+            set_match = await self._match_set(parsed)
+            brief_cards = await self._search_brief_cards(parsed, include_card_number=True, set_match=set_match)
+            if not brief_cards and parsed.card_number:
+                brief_cards = await self._search_brief_cards(parsed, include_card_number=False, set_match=set_match)
+        except NoCardsFound:
+            return []
+
+        if not brief_cards:
+            return []
+
+        detail_cards = await self._fetch_card_details(brief_cards[: self.candidate_limit])
+        if not detail_cards:
+            return []
+
+        return [await self._normalize_card(card, language="en") for card in detail_cards]
+
+    async def _search_japanese_cards(self, parsed: ParsedQuery) -> list[dict[str, Any]]:
+        if not self.enable_japanese_search:
+            return []
+
+        search_spec = build_japanese_search_spec(parsed)
+        if not search_spec:
+            return []
+
+        try:
+            brief_cards = await self._search_japanese_brief_cards(search_spec)
+            if brief_cards:
+                detail_cards = await self._fetch_card_details(brief_cards[: self.candidate_limit], language="ja")
+            else:
+                detail_cards = await self._search_broad_japanese_details(search_spec)
+        except (NoCardsFound, PricingAPIError):
+            return []
+
+        return [
+            await self._normalize_card(card, language="ja", query_name_match=True)
+            for card in detail_cards[: self.candidate_limit]
+        ]
+
+    async def _search_japanese_brief_cards(self, search_spec: JapaneseSearchSpec) -> list[dict[str, Any]]:
+        for name_search in search_spec.names:
+            for card_number in search_spec.number_variants:
+                payload = await self._request_json(
+                    "/cards",
+                    params={
+                        "name": f"{name_search}*",
+                        "localId": card_number,
+                        "pagination:page": "1",
+                        "pagination:itemsPerPage": str(self.candidate_limit),
+                    },
+                    language="ja",
+                )
+                if not isinstance(payload, list):
+                    raise PricingAPIError("TCGdex returned malformed Japanese search data.")
+                cards = [card for card in payload if isinstance(card, dict)]
+                if cards:
+                    return cards
+        return []
+
+    async def _search_broad_japanese_details(self, search_spec: JapaneseSearchSpec) -> list[dict[str, Any]]:
+        if search_spec.dex_id is None:
+            return []
+
+        for card_number in search_spec.number_variants:
+            payload = await self._request_json(
+                "/cards",
+                params={
+                    "localId": card_number,
+                    "pagination:page": "1",
+                    "pagination:itemsPerPage": str(BROAD_NAME_FALLBACK_PAGE_SIZE),
+                },
+                language="ja",
+            )
+            if not isinstance(payload, list):
+                raise PricingAPIError("TCGdex returned malformed Japanese search data.")
+            brief_cards = [card for card in payload if isinstance(card, dict)]
+            if not brief_cards:
+                continue
+            detail_cards = await self._fetch_card_details(brief_cards, language="ja")
+            filtered_cards = [card for card in detail_cards if card_has_dex_id(card, search_spec.dex_id)]
+            if filtered_cards:
+                return filtered_cards
+        return []
 
     async def _search_brief_cards(
         self,
@@ -750,8 +978,8 @@ class TCGdexPricingProvider(CachedProvider):
         self.set_cache["sets"] = sets
         return sets
 
-    async def _fetch_card_details(self, brief_cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        tasks = [self._fetch_one_card_detail(card) for card in brief_cards if card.get("id")]
+    async def _fetch_card_details(self, brief_cards: list[dict[str, Any]], language: str = "en") -> list[dict[str, Any]]:
+        tasks = [self._fetch_one_card_detail(card, language=language) for card in brief_cards if card.get("id")]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         details: list[dict[str, Any]] = []
@@ -764,16 +992,22 @@ class TCGdexPricingProvider(CachedProvider):
                 details.append(result)
         return details
 
-    async def _fetch_one_card_detail(self, brief_card: dict[str, Any]) -> dict[str, Any]:
+    async def _fetch_one_card_detail(self, brief_card: dict[str, Any], language: str = "en") -> dict[str, Any]:
         card_id = str(brief_card["id"])
-        payload = await self._request_json(f"/cards/{card_id}")
+        payload = await self._request_json(f"/cards/{card_id}", language=language)
         if not isinstance(payload, dict):
             raise PricingAPIError("TCGdex returned malformed card data.")
         return payload
 
-    async def _request_json(self, path: str, params: dict[str, str] | None = None) -> Any:
+    async def _request_json(
+        self,
+        path: str,
+        params: dict[str, str] | None = None,
+        language: str = "en",
+    ) -> Any:
         try:
-            response = await self._get_client().get(path, params=params)
+            client = self._get_client() if language == "en" else self._get_client(language)
+            response = await client.get(path, params=params)
         except httpx.TimeoutException as exc:
             raise PricingAPIError("TCGdex timed out.") from exc
         except httpx.HTTPError as exc:
@@ -793,7 +1027,12 @@ class TCGdexPricingProvider(CachedProvider):
         except ValueError as exc:
             raise PricingAPIError("TCGdex returned malformed data.") from exc
 
-    def _get_client(self) -> httpx.AsyncClient:
+    def _get_client(self, language: str = "en") -> httpx.AsyncClient:
+        if language == "ja":
+            if self._japanese_client is None:
+                self._japanese_client = httpx.AsyncClient(base_url=self.japanese_base_url, timeout=self.timeout_seconds)
+            return self._japanese_client
+
         if self._client is None:
             self._client = httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout_seconds)
         return self._client
@@ -803,8 +1042,14 @@ class TCGdexPricingProvider(CachedProvider):
             self._exchange_client = httpx.AsyncClient(base_url=self.exchange_api_base, timeout=self.timeout_seconds)
         return self._exchange_client
 
-    async def _normalize_card(self, card: dict[str, Any]) -> dict[str, Any]:
+    async def _normalize_card(
+        self,
+        card: dict[str, Any],
+        language: str = "en",
+        query_name_match: bool = False,
+    ) -> dict[str, Any]:
         card_id = str(card.get("id") or "")
+        source_base_url = self.japanese_base_url if language == "ja" else self.base_url
         image_url = build_tcgdex_image_url(
             card.get("image"),
             quality=self.image_quality,
@@ -831,8 +1076,11 @@ class TCGdexPricingProvider(CachedProvider):
             "images": build_image_payload(image_url, fallback_image_url),
             "provider_id": self.provider_id,
             "provider_name": self.provider_name,
+            "language": language,
+            "language_label": LANGUAGE_LABELS.get(language, language),
+            "query_name_match": query_name_match,
             "price_source_name": normalized_prices["source_name"],
-            "source_url": f"{self.base_url}/cards/{card_id}" if card_id else None,
+            "source_url": f"{source_base_url}/cards/{card_id}" if card_id else None,
             "source_link_label": "View TCGdex data",
             "prices": normalized_prices,
             "tcgplayer": tcgplayer_pricing,
@@ -893,6 +1141,35 @@ def build_tcgdex_image_url(raw_image_url: Any, quality: str = "low", extension: 
     if image_url.endswith((".png", ".jpg", ".webp")):
         return image_url
     return f"{image_url}/{quality}.{extension}"
+
+
+def derive_japanese_base_url(base_url: str) -> str:
+    normalized_base_url = base_url.rstrip("/")
+    if normalized_base_url.endswith("/en"):
+        return f"{normalized_base_url[:-3]}/ja"
+    return f"{normalized_base_url}/ja"
+
+
+def deduplicate_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen_ids: set[str] = set()
+    deduplicated_cards: list[dict[str, Any]] = []
+    for card in cards:
+        card_id = str(card.get("id") or "")
+        dedupe_key = card_id if card_id else repr(card)
+        if dedupe_key in seen_ids:
+            continue
+        seen_ids.add(dedupe_key)
+        deduplicated_cards.append(card)
+    return deduplicated_cards
+
+
+def card_has_dex_id(card: dict[str, Any], dex_id: int) -> bool:
+    raw_dex_ids = card.get("dexId")
+    if isinstance(raw_dex_ids, int):
+        return raw_dex_ids == dex_id
+    if isinstance(raw_dex_ids, list):
+        return dex_id in raw_dex_ids
+    return False
 
 
 def build_image_payload(image_url: str | None, fallback_image_url: str | None) -> dict[str, str]:

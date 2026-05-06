@@ -130,6 +130,26 @@ def test_format_price_message_compact_with_converted_currency() -> None:
     assert "Updated: May 6, 2026, 8:42 AM SGT" in message
 
 
+def test_format_price_message_marks_japanese_cards() -> None:
+    card = {
+        "name": "ユキワラシ",
+        "number": "063",
+        "rarity": "AR",
+        "language": "ja",
+        "set": {"name": "レイジングサーフ"},
+        "price_source_name": "Cardmarket via TCGdex",
+        "prices": {
+            "unit": "EUR",
+            "labels": {"low": "Low", "mid": "Avg", "market": "Trend"},
+            "variants": {"normal": {"low": 0.02, "mid": 0.02, "market": 0.03}},
+        },
+    }
+
+    message = format_price_message(card, "normal", compact=True)
+
+    assert "<b>ユキワラシ</b> - レイジングサーフ #063 (JP)" in message
+
+
 def test_get_image_url_returns_none_when_missing() -> None:
     assert get_image_url({"images": {}}) is None
 
@@ -191,3 +211,20 @@ def test_build_result_keyboard_includes_variant_and_alternative_buttons() -> Non
     assert "View TCGdex data" in button_texts
     assert "Holo" in button_texts
     assert any("Charizard" in text for text in button_texts)
+
+
+def test_build_result_keyboard_marks_mixed_language_alternatives() -> None:
+    japanese_card = {
+        "id": "SV3a-063",
+        "name": "ユキワラシ",
+        "number": "063",
+        "language": "ja",
+        "set": {"name": "レイジングサーフ"},
+        "prices": {"variants": {"normal": {"market": 1}}},
+    }
+
+    keyboard = build_result_keyboard("abc123", (CARD, japanese_card), 0, "normal")
+
+    assert keyboard is not None
+    button_texts = [button.text for row in keyboard.inline_keyboard for button in row]
+    assert any("[JP] ユキワラシ" in text for text in button_texts)

@@ -55,6 +55,8 @@ def create_application() -> Application:
         cache_ttl_seconds=get_int_env("CACHE_TTL_SECONDS", 3600),
         max_results=max_results,
         tcgdex_candidate_limit=get_int_env("TCGDEX_CANDIDATE_LIMIT", max_results),
+        tcgdex_japanese_api_base=os.getenv("TCGDEX_JAPANESE_API_BASE"),
+        enable_japanese_search=get_bool_env("ENABLE_JAPANESE_SEARCH", True),
         display_currency=os.getenv("DISPLAY_CURRENCY", "SGD"),
         exchange_api_base=os.getenv("EXCHANGE_API_BASE", "https://api.frankfurter.dev"),
     )
@@ -252,6 +254,17 @@ def get_int_env(name: str, default: int) -> int:
         raise RuntimeError(f"Invalid {name} value: {raw_value}") from exc
 
 
+def get_bool_env(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name, "").strip().lower()
+    if not raw_value:
+        return default
+    if raw_value in {"1", "true", "yes", "on"}:
+        return True
+    if raw_value in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"Invalid {name} value: {raw_value}")
+
+
 def is_chat_allowed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     allowed_chat_ids = context.application.bot_data.get("allowed_chat_ids", frozenset())
     allowed_topic_ids = context.application.bot_data.get("allowed_topic_ids", frozenset())
@@ -388,7 +401,10 @@ def build_result_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    truncate(f"{index + 1}. {summarize_card(card)}", max_length=60),
+                    truncate(
+                        f"{index + 1}. {summarize_card(card, include_language=has_mixed_languages(cards))}",
+                        max_length=60,
+                    ),
                     callback_data=f"card:{lookup_id}:{index}",
                 )
             ]
@@ -401,6 +417,10 @@ def build_result_keyboard(
 
 def chunk_buttons(buttons: list[InlineKeyboardButton], size: int) -> list[list[InlineKeyboardButton]]:
     return [buttons[index : index + size] for index in range(0, len(buttons), size)]
+
+
+def has_mixed_languages(cards: tuple[dict[str, Any], ...]) -> bool:
+    return len({str(card.get("language") or "en") for card in cards}) > 1
 
 
 def format_variant_button_label(variant: str) -> str:
