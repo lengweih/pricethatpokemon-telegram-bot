@@ -1,0 +1,6 @@
+python-telegram-bot==22.7
+fastapi
+httpx
+cachetools
+python-dotenv
+pytest
